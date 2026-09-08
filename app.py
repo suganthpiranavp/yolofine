@@ -570,7 +570,7 @@ def main():
 
             # 1. Update Video Frame
             frame_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            video_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
+            video_placeholder.image(frame_rgb, channels="RGB", width="stretch")
 
             # 2. Update Resolution & FPS Bar
             video_footer_ph.markdown(f"""
