@@ -1,12 +1,15 @@
 import os
 import sys
 import tempfile
+import time
 import cv2
 import streamlit as st
 import numpy as np
 
 from detector import PersonDetector
 from tracker import PersonTracker
+from identity_manager import IdentityManager
+from counter import PersonCounter
 from metrics import TrackingMetrics
 from pipeline import process_frame
 
@@ -14,10 +17,10 @@ from pipeline import process_frame
 # PAGE CONFIGURATION & DARK CV THEME
 # ==========================================
 st.set_page_config(
-    page_title="YOLOv8 + ByteTrack Person Tracker",
+    page_title="YOLOv8 + ByteTrack Person Tracker & Counter",
     page_icon="🤖",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="collapsed"
 )
 
 # Professional Computer-Vision Dashboard CSS
@@ -28,17 +31,6 @@ st.markdown("""
         background-color: #0B0F17;
         color: #F8FAFC;
         font-family: 'Inter', system-ui, -apple-system, sans-serif;
-    }
-
-    /* Sidebar Styling */
-    section[data-testid="stSidebar"] {
-        background-color: #0E1420 !important;
-        border-right: 1px solid #1F2937 !important;
-    }
-    section[data-testid="stSidebar"] .block-container {
-        padding-top: 1.5rem !important;
-        padding-left: 1rem !important;
-        padding-right: 1rem !important;
     }
 
     /* Hide default padding & stream element chrome */
@@ -136,7 +128,7 @@ st.markdown("""
         background-color: #090D16;
         border: 2px dashed #1F2937;
         border-radius: 12px;
-        height: 440px;
+        height: 380px;
         display: flex;
         flex-direction: column;
         justify-content: center;
@@ -182,14 +174,14 @@ st.markdown("""
         box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2);
     }
     .stat-value {
-        font-size: 2.2rem;
+        font-size: 2rem;
         font-weight: 800;
         color: #3B82F6;
         line-height: 1.1;
         letter-spacing: -0.03em;
     }
     .stat-label {
-        font-size: 0.78rem;
+        font-size: 0.75rem;
         font-weight: 600;
         color: #94A3B8;
         text-transform: uppercase;
@@ -249,6 +241,22 @@ st.markdown("""
         font-size: 0.75rem;
         font-weight: 600;
     }
+    .badge-in {
+        background-color: rgba(59, 130, 246, 0.2);
+        color: #60A5FA;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+    }
+    .badge-out {
+        background-color: rgba(245, 158, 11, 0.2);
+        color: #FBBF24;
+        padding: 2px 8px;
+        border-radius: 4px;
+        font-size: 0.75rem;
+        font-weight: 700;
+    }
 
     /* Streamlit Widget Styling Overrides */
     div[data-testid="stRadio"] > label {
@@ -303,16 +311,16 @@ def main():
     <div class="app-header">
         <div>
             <div style="display: flex; align-items: center;">
-                <h1 class="app-title">PERSON TRACKER</h1>
+                <h1 class="app-title">PERSON TRACKER & COUNTER</h1>
                 <div class="status-badge">
                     <span class="status-dot"></span>
                     {'System Ready' if is_model_ready else 'Model Missing'}
                 </div>
             </div>
-            <div class="app-subtitle">YOLOv8 Detection + ByteTrack Multi-Object Tracking</div>
+            <div class="app-subtitle">YOLOv8 + ByteTrack + Re-ID + Virtual Line IN/OUT Counting</div>
         </div>
         <div class="header-info-pill">
-            Model: <span>Custom YOLOv8</span> &nbsp;|&nbsp; Tracker: <span>ByteTrack</span>
+            Model: <span>Custom YOLOv8</span> &nbsp;|&nbsp; Tracker: <span>ByteTrack</span> &nbsp;|&nbsp; Re-ID: <span>Enabled</span>
         </div>
     </div>
     """
@@ -325,105 +333,120 @@ def main():
 
     model_info = detector.get_model_info()
 
-    # Session state for tracking control & AI video playback
+    # Session state for tracking control and playback
     if "tracking_active" not in st.session_state:
         st.session_state.tracking_active = False
     if "ai_video_path" not in st.session_state:
         st.session_state.ai_video_path = None
 
     # ==========================================
-    # LEFT SLIDING SIDEBAR: CONTROL PANEL
+    # CONTROL PANEL & MAIN LAYOUT
     # ==========================================
-    with st.sidebar:
-        st.markdown('<div class="dashboard-card"><div class="card-title">CONTROL PANEL</div>', unsafe_allow_html=True)
+    with st.expander("⚙️ CONTROL PANEL (Settings & Input Source)", expanded=True):
+        st.markdown('<div class="dashboard-card" style="margin-bottom: 0;">', unsafe_allow_html=True)
 
-        # 1. INPUT SOURCE SELECTION
-        st.markdown('<div style="font-size: 0.8rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; margin-bottom: 8px;">INPUT SOURCE</div>', unsafe_allow_html=True)
-        source_type = st.radio(
-            "Select Input Source",
-            options=["Upload Video", "Webcam"],
-            horizontal=True,
-            key="input_source_radio",
-            label_visibility="collapsed"
-        )
+        col_ctrl1, col_ctrl2, col_ctrl3 = st.columns(3)
 
-        video_path = None
-        video_metadata_str = ""
-
-        if source_type == "Upload Video":
-            uploaded_file = st.file_uploader(
-                "Upload a video file (.mp4, .avi, .mov, .mkv)",
-                type=["mp4", "avi", "mov", "mkv"],
-                key="video_file_uploader_dark"
+        # COLUMN 1: INPUT SOURCE & DETECTION SETTINGS
+        with col_ctrl1:
+            st.markdown('<div style="font-size: 0.8rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; margin-bottom: 8px;">1. INPUT SOURCE</div>', unsafe_allow_html=True)
+            source_type = st.radio(
+                "Select Input Source",
+                options=["Upload Video", "Webcam"],
+                horizontal=True,
+                key="input_source_radio",
+                label_visibility="collapsed"
             )
-            if uploaded_file is not None:
-                os.makedirs("input", exist_ok=True)
-                temp_video_path = os.path.join("input", "uploaded_temp.mp4")
-                with open(temp_video_path, "wb") as f:
-                    f.write(uploaded_file.getbuffer())
-                video_path = temp_video_path
-                video_metadata_str = f"File: {uploaded_file.name} ({uploaded_file.size / (1024*1024):.1f} MB)"
-                st.caption(f"📁 `{video_metadata_str}`")
-        else:
+
+            video_path = None
+            video_metadata_str = ""
+
+            if source_type == "Upload Video":
+                uploaded_file = st.file_uploader(
+                    "Upload a video file (.mp4, .avi, .mov, .mkv)",
+                    type=["mp4", "avi", "mov", "mkv"],
+                    key="video_file_uploader_dark"
+                )
+                if uploaded_file is not None:
+                    os.makedirs("input", exist_ok=True)
+                    temp_video_path = os.path.join("input", "uploaded_temp.mp4")
+                    with open(temp_video_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    video_path = temp_video_path
+                    video_metadata_str = f"File: {uploaded_file.name} ({uploaded_file.size / (1024*1024):.1f} MB)"
+                    st.caption(f"📁 `{video_metadata_str}`")
+            else:
+                st.markdown("""
+                    <div style="background-color: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 6px; padding: 8px 12px; font-size: 0.82rem; color: #34D399; margin-bottom: 12px;">
+                        ● Camera Connected (Ready)
+                    </div>
+                """, unsafe_allow_html=True)
+
+            st.markdown('<div style="font-size: 0.8rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; margin-top: 10px; margin-bottom: 4px;">DETECTION THRESHOLD</div>', unsafe_allow_html=True)
+            conf_threshold = st.slider(
+                "Confidence Threshold",
+                min_value=0.10,
+                max_value=0.95,
+                value=0.50,
+                step=0.05,
+                key="conf_slider_dark"
+            )
+
+        # COLUMN 2: VIRTUAL COUNTING LINE CONFIGURATION
+        with col_ctrl2:
+            st.markdown('<div style="font-size: 0.8rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; margin-bottom: 8px;">2. COUNTING LINE CONFIGURATION</div>', unsafe_allow_html=True)
+
+            line_pos_slider = st.slider(
+                "Line Y-Position (% Height)",
+                min_value=10,
+                max_value=90,
+                value=50,
+                step=5,
+                key="line_pos_slider"
+            )
+            line_ratio = line_pos_slider / 100.0
+
+            dir_selection = st.radio(
+                "Counting Direction",
+                options=["Top → Bottom = IN", "Bottom → Top = IN"],
+                horizontal=False,
+                key="dir_mode_radio"
+            )
+            direction_mode = "A_TO_B_IS_IN" if dir_selection == "Top → Bottom = IN" else "B_TO_A_IS_IN"
+
+        # COLUMN 3: TRACKING ACTIONS & SYSTEM SUMMARY
+        with col_ctrl3:
+            st.markdown('<div style="font-size: 0.8rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; margin-bottom: 8px;">3. TRACKING CONTROL</div>', unsafe_allow_html=True)
+
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                start_btn = st.button("Start Tracking", use_container_width=True, type="primary", key="btn_start_dark")
+            with btn_col2:
+                stop_btn = st.button("Stop Tracking", use_container_width=True, key="btn_stop_dark")
+
+            if start_btn:
+                st.session_state.tracking_active = True
+            if stop_btn:
+                st.session_state.tracking_active = False
+
             st.markdown("""
-                <div style="background-color: rgba(16, 185, 129, 0.1); border: 1px solid rgba(16, 185, 129, 0.2); border-radius: 6px; padding: 8px 12px; font-size: 0.82rem; color: #34D399; margin-bottom: 12px;">
-                    ● Camera Connected (Ready)
-                </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("<hr style='border-color: #1F2937; margin: 16px 0;'>", unsafe_allow_html=True)
-
-        # 2. DETECTION SETTINGS
-        st.markdown('<div style="font-size: 0.8rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; margin-bottom: 4px;">DETECTION SETTINGS</div>', unsafe_allow_html=True)
-        conf_threshold = st.slider(
-            "Confidence Threshold",
-            min_value=0.10,
-            max_value=0.95,
-            value=0.50,
-            step=0.05,
-            key="conf_slider_dark"
-        )
-        st.markdown(f'<div style="font-size: 0.8rem; color: #64748B; margin-top: -8px; margin-bottom: 14px;">Current threshold: <strong>{int(conf_threshold*100)}%</strong></div>', unsafe_allow_html=True)
-
-        st.markdown("<hr style='border-color: #1F2937; margin: 16px 0;'>", unsafe_allow_html=True)
-
-        # 3. TRACKING ACTION BUTTONS
-        st.markdown('<div style="font-size: 0.8rem; font-weight: 700; color: #94A3B8; text-transform: uppercase; margin-bottom: 8px;">TRACKING CONTROL</div>', unsafe_allow_html=True)
-        btn_col1, btn_col2 = st.columns(2)
-        with btn_col1:
-            start_btn = st.button("Start Tracking", use_container_width=True, type="primary", key="btn_start_dark")
-        with btn_col2:
-            stop_btn = st.button("Stop Tracking", use_container_width=True, key="btn_stop_dark")
-
-        if start_btn:
-            st.session_state.tracking_active = True
-        if stop_btn:
-            st.session_state.tracking_active = False
+                <table class="sys-info-table" style="margin-top: 10px;">
+                    <tr><td class="label">Model</td><td class="val">Custom YOLOv8</td></tr>
+                    <tr><td class="label">Tracker</td><td class="val">ByteTrack + Re-ID</td></tr>
+                    <tr><td class="label">Device</td><td class="val">{}</td></tr>
+                    <tr><td class="label">Line Y-Pos</td><td class="val">{}%</td></tr>
+                </table>
+            """.format(model_info['device'], line_pos_slider), unsafe_allow_html=True)
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-        # 4. SYSTEM INFORMATION CARD
-        st.markdown(f"""
-            <div class="dashboard-card">
-                <div class="card-title">SYSTEM INFORMATION</div>
-                <table class="sys-info-table">
-                    <tr><td class="label">Model</td><td class="val">Custom YOLOv8</td></tr>
-                    <tr><td class="label">Tracker</td><td class="val">ByteTrack</td></tr>
-                    <tr><td class="label">Detection Class</td><td class="val">Person</td></tr>
-                    <tr><td class="label">Hardware Device</td><td class="val">{model_info['device']}</td></tr>
-                    <tr><td class="label">Confidence</td><td class="val">{int(conf_threshold*100)}%</td></tr>
-                    <tr><td class="label">Input Source</td><td class="val">{'Webcam' if source_type == 'Webcam' else 'Video'}</td></tr>
-                </table>
-            </div>
-        """, unsafe_allow_html=True)
-
     # ==========================================
-    # MAIN AREA: VIDEO COMPARISON SECTION
+    # MAIN AREA: SIDE-BY-SIDE VIDEO COMPARISON
     # ==========================================
     st.markdown("""
-        <div style="text-align: center; margin: 0 0 16px 0; background: linear-gradient(90deg, #111827 0%, #1E293B 100%); border: 1px solid #1F2937; border-radius: 10px; padding: 10px;">
+        <div style="text-align: center; margin: 10px 0 16px 0; background: linear-gradient(90deg, #111827 0%, #1E293B 100%); border: 1px solid #1F2937; border-radius: 10px; padding: 10px;">
             <span style="font-size: 1.15rem; font-weight: 800; letter-spacing: 0.12em; color: #F8FAFC; text-transform: uppercase;">
-                VIDEO COMPARISON
+                VIDEO COMPARISON & COUNTING STREAM
             </span>
         </div>
     """, unsafe_allow_html=True)
@@ -442,7 +465,7 @@ def main():
         orig_footer_ph = st.empty()
         orig_footer_ph.markdown("""
             <div class="video-footer-bar">
-                <span>Stream: <strong>Original</strong></span>
+                <span>Stream: <strong>Original Input</strong></span>
                 <span>Type: <strong>Raw Video</strong></span>
             </div>
             </div>
@@ -453,7 +476,7 @@ def main():
         st.markdown(f"""
             <div class="dashboard-card" style="padding-bottom: 12px; margin-bottom: 10px;">
                 <div class="card-title">
-                    <span>AI-GENERATED VIDEO</span>
+                    <span>AI-TRACKED & COUNTING VIDEO</span>
                     <span>{live_status_html}</span>
                 </div>
         """, unsafe_allow_html=True)
@@ -480,8 +503,8 @@ def main():
                             <polygon points="23 7 16 12 23 17 23 7"></polygon>
                             <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
                         </svg>
-                        <div class="video-empty-title">Ready for AI Tracking</div>
-                        <div class="video-empty-desc">Click <strong>Start Tracking</strong> in the control panel to generate side-by-side detections.</div>
+                        <div class="video-empty-title">Ready for AI Tracking & Counting</div>
+                        <div class="video-empty-desc">Click <strong>Start Tracking</strong> in the control panel to begin processing.</div>
                     </div>
                 """, unsafe_allow_html=True)
         else:
@@ -492,7 +515,7 @@ def main():
                         <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
                     </svg>
                     <div class="video-empty-title">No video selected</div>
-                    <div class="video-empty-desc">Upload a video file or select webcam from the left control panel.</div>
+                    <div class="video-empty-desc">Upload a video file or select webcam from the control panel.</div>
                 </div>
             """, unsafe_allow_html=True)
             ai_video_ph.markdown("""
@@ -501,99 +524,172 @@ def main():
                         <polygon points="23 7 16 12 23 17 23 7"></polygon>
                         <rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
                     </svg>
-                    <div class="video-empty-title">AI Video Output</div>
-                    <div class="video-empty-desc">Detections with persistent IDs will stream here side-by-side.</div>
+                    <div class="video-empty-title">AI Output Display</div>
+                    <div class="video-empty-desc">Annotated detections, Re-ID persistent IDs, and counting line stream here.</div>
                 </div>
             """, unsafe_allow_html=True)
 
     # ==========================================
-    # LIVE STATISTICS CARDS (3 PRIMARY METRICS)
+    # LIVE STATISTICS CARDS (IN, OUT, CURRENT, UNIQUE, FPS)
     # ==========================================
-    stat_col1, stat_col2, stat_col3 = st.columns(3)
+    stat_col1, stat_col2, stat_col3, stat_col4, stat_col5 = st.columns(5)
     with stat_col1:
         stat1_ph = st.empty()
     with stat_col2:
         stat2_ph = st.empty()
     with stat_col3:
         stat3_ph = st.empty()
+    with stat_col4:
+        stat4_ph = st.empty()
+    with stat_col5:
+        stat5_ph = st.empty()
 
-    def update_stats_display(curr: int, total: int, fps_val: float):
+    def update_stats_display(in_cnt: int, out_cnt: int, curr_inside: int, total_unique: int, fps_val: float):
         stat1_ph.markdown(f"""
             <div class="stat-card">
-                <div class="stat-value">{curr:02d}</div>
-                <div class="stat-label">CURRENT PEOPLE</div>
+                <div class="stat-value" style="color: #60A5FA;">{in_cnt:02d}</div>
+                <div class="stat-label">IN COUNT</div>
             </div>
         """, unsafe_allow_html=True)
         stat2_ph.markdown(f"""
             <div class="stat-card">
-                <div class="stat-value">{total:02d}</div>
-                <div class="stat-label">TOTAL UNIQUE</div>
+                <div class="stat-value" style="color: #FBBF24;">{out_cnt:02d}</div>
+                <div class="stat-label">OUT COUNT</div>
             </div>
         """, unsafe_allow_html=True)
         stat3_ph.markdown(f"""
             <div class="stat-card">
-                <div class="stat-value">{fps_val:.1f}</div>
+                <div class="stat-value" style="color: #34D399;">{curr_inside:02d}</div>
+                <div class="stat-label">CURRENT INSIDE</div>
+            </div>
+        """, unsafe_allow_html=True)
+        stat4_ph.markdown(f"""
+            <div class="stat-card">
+                <div class="stat-value" style="color: #A78BFA;">{total_unique:02d}</div>
+                <div class="stat-label">TOTAL UNIQUE</div>
+            </div>
+        """, unsafe_allow_html=True)
+        stat5_ph.markdown(f"""
+            <div class="stat-card">
+                <div class="stat-value" style="color: #3B82F6;">{fps_val:.1f}</div>
                 <div class="stat-label">FPS</div>
             </div>
         """, unsafe_allow_html=True)
 
     # Render initial stat cards
-    update_stats_display(0, 0, 0.0)
+    update_stats_display(0, 0, 0, 0, 0.0)
 
     # ==========================================
-    # TRACKED PERSONS TABLE SECTION
+    # TABLES SECTION: TRACKED PERSONS & EVENT LOG
     # ==========================================
-    st.markdown("""
-        <div class="dashboard-card" style="margin-top: 20px;">
-            <div class="card-title">TRACKED PERSONS</div>
-    """, unsafe_allow_html=True)
+    tbl_col1, tbl_col2 = st.columns(2)
 
-    tracks_table_ph = st.empty()
-
-    def update_tracks_table(tracks_list):
-        if not tracks_list:
-            tracks_table_ph.markdown("""
-                <div style="text-align: center; color: #475569; padding: 20px; font-size: 0.85rem;">
-                    No active tracks detected
-                </div>
-            """, unsafe_allow_html=True)
-            return
-
-        rows_html = ""
-        for t in tracks_list:
-            t_id = str(t.get('person_id', t['track_id']))
-            t_conf = f"{t['conf']:.2f}"
-            rows_html += f"""
-                <tr>
-                    <td><strong>{t_id}</strong></td>
-                    <td>{t_conf}</td>
-                    <td><span class="badge-tracking">Tracking</span></td>
-                </tr>
-            """
-
-        tracks_table_ph.markdown(f"""
-            <table class="track-table">
-                <thead>
-                    <tr>
-                        <th>ID</th>
-                        <th>CONFIDENCE</th>
-                        <th>STATUS</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {rows_html}
-                </tbody>
-            </table>
+    with tbl_col1:
+        st.markdown("""
+            <div class="dashboard-card" style="margin-top: 20px;">
+                <div class="card-title">TRACKED PERSONS</div>
         """, unsafe_allow_html=True)
+        tracks_table_ph = st.empty()
 
-    update_tracks_table([])
-    st.markdown("</div>", unsafe_allow_html=True)
+        def update_tracks_table(tracks_list):
+            if not tracks_list:
+                tracks_table_ph.markdown("""
+                    <div style="text-align: center; color: #475569; padding: 20px; font-size: 0.85rem;">
+                        No active tracks detected
+                    </div>
+                """, unsafe_allow_html=True)
+                return
+
+            rows_html = ""
+            for t in tracks_list:
+                t_id = str(t.get('person_id', t['track_id']))
+                t_conf = f"{t['conf']:.2f}"
+                rows_html += f"""
+                    <tr>
+                        <td><strong>{t_id}</strong></td>
+                        <td>{t_conf}</td>
+                        <td><span class="badge-tracking">Tracking</span></td>
+                    </tr>
+                """
+
+            tracks_table_ph.markdown(f"""
+                <table class="track-table">
+                    <thead>
+                        <tr>
+                            <th>PERSISTENT ID</th>
+                            <th>CONFIDENCE</th>
+                            <th>STATUS</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+            """, unsafe_allow_html=True)
+
+        update_tracks_table([])
+        st.markdown("</div>", unsafe_allow_html=True)
+
+    with tbl_col2:
+        st.markdown("""
+            <div class="dashboard-card" style="margin-top: 20px;">
+                <div class="card-title">IN/OUT EVENT LOG</div>
+        """, unsafe_allow_html=True)
+        events_table_ph = st.empty()
+
+        def update_events_table(events_list):
+            if not events_list:
+                events_table_ph.markdown("""
+                    <div style="text-align: center; color: #475569; padding: 20px; font-size: 0.85rem;">
+                        No crossing events logged yet
+                    </div>
+                """, unsafe_allow_html=True)
+                return
+
+            # Display most recent 5 events first
+            recent_events = list(reversed(events_list[-5:]))
+            rows_html = ""
+            for evt in recent_events:
+                p_id = evt['person_id']
+                direction = evt['direction']
+                frame_no = evt['frame']
+                t_str = time.strftime("%H:%M:%S", time.localtime(evt['timestamp']))
+                badge_class = "badge-in" if direction == "IN" else "badge-out"
+                rows_html += f"""
+                    <tr>
+                        <td>{t_str}</td>
+                        <td><strong>{p_id}</strong></td>
+                        <td><span class="{badge_class}">{direction}</span></td>
+                        <td>Frame #{frame_no}</td>
+                    </tr>
+                """
+
+            events_table_ph.markdown(f"""
+                <table class="track-table">
+                    <thead>
+                        <tr>
+                            <th>TIME</th>
+                            <th>PERSON ID</th>
+                            <th>DIRECTION</th>
+                            <th>FRAME</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {rows_html}
+                    </tbody>
+                </table>
+            """, unsafe_allow_html=True)
+
+        update_events_table([])
+        st.markdown("</div>", unsafe_allow_html=True)
 
     # ==========================================
-    # TRACKING FRAME PROCESSING LOOP
+    # TRACKING & COUNTING FRAME PROCESSING LOOP
     # ==========================================
     if st.session_state.tracking_active:
         tracker = PersonTracker(track_thresh=conf_threshold)
+        identity_manager = IdentityManager()
+        counter = PersonCounter(line_ratio=line_ratio, direction_mode=direction_mode, margin=15)
         metrics = TrackingMetrics()
 
         if source_type == "Upload Video":
@@ -636,11 +732,17 @@ def main():
 
             # 1. Update Original Video Frame (Left Side)
             frame_orig_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            orig_video_ph.image(frame_orig_rgb, channels="RGB", use_container_width=True)
+            orig_video_ph.image(frame_orig_rgb, channels="RGB", width="stretch")
 
-            # 2. Process frame using existing CV pipeline (Detection + Tracking + Re-ID)
+            # 2. Process frame using CV pipeline (YOLOv8 + ByteTrack + Re-ID + PersonCounter)
             annotated_frame, frame_metrics = process_frame(
-                frame, detector, tracker, metrics, conf_threshold=conf_threshold
+                frame,
+                detector,
+                tracker,
+                metrics,
+                conf_threshold=conf_threshold,
+                identity_manager=identity_manager,
+                counter=counter
             )
 
             if writer is not None:
@@ -648,7 +750,7 @@ def main():
 
             # 3. Update AI Annotated Frame (Right Side)
             annotated_rgb = cv2.cvtColor(annotated_frame, cv2.COLOR_BGR2RGB)
-            ai_video_ph.image(annotated_rgb, channels="RGB", use_container_width=True)
+            ai_video_ph.image(annotated_rgb, channels="RGB", width="stretch")
 
             # 4. Update Footers
             orig_footer_ph.markdown(f"""
@@ -662,23 +764,26 @@ def main():
             ai_footer_ph.markdown(f"""
                 <div class="video-footer-bar">
                     <span>FPS: <strong>{frame_metrics['fps']:.1f}</strong></span>
-                    <span>Active: <strong>{frame_metrics['current_people']}</strong></span>
+                    <span>Active Tracks: <strong>{frame_metrics['current_people']}</strong></span>
                 </div>
                 </div>
             """, unsafe_allow_html=True)
 
-            # 5. Update Statistics Cards & Track Table
+            # 5. Update Statistics Cards & Tables
             update_stats_display(
-                frame_metrics['current_people'],
+                frame_metrics['in_count'],
+                frame_metrics['out_count'],
+                frame_metrics['current_inside'],
                 frame_metrics['total_unique'],
                 frame_metrics['fps']
             )
             update_tracks_table(frame_metrics.get('tracks', []))
+            update_events_table(frame_metrics.get('events_log', []))
 
         cap.release()
         if writer is not None:
             writer.release()
-            # Fast convert with ffmpeg for seamless browser playback
+            # Convert with ffmpeg for browser playback if ffmpeg exists
             ffmpeg_path = "/Users/theepan/.local/bin/ffmpeg" if os.path.exists("/Users/theepan/.local/bin/ffmpeg") else "ffmpeg"
             os.system(f"{ffmpeg_path} -y -i {raw_out_path} -vcodec libx264 -pix_fmt yuv420p -movflags +faststart {final_ai_video} -loglevel quiet")
             if os.path.exists(final_ai_video):
@@ -692,4 +797,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
